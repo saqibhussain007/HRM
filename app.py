@@ -246,36 +246,65 @@ def get_all_users():
     return df
 
 def add_user(email, password, name, role):
+    """Add new user or reactivate deleted user"""
     conn = sqlite3.connect('northern_harvest.db')
     c = conn.cursor()
     try:
-        c.execute('INSERT INTO users (email, password, name, role, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)',
-                 (email, hash_password(password), name, role, datetime.now()))
+        # Check if user exists (inactive)
+        c.execute('SELECT id FROM users WHERE email = ?', (email,))
+        existing = c.fetchone()
+        
+        if existing:
+            # Reactivate and update password
+            c.execute('UPDATE users SET password = ?, name = ?, role = ?, is_active = 1, created_at = ? WHERE email = ?',
+                     (hash_password(password), name, role, datetime.now(), email))
+            action = 'USER_REACTIVATE'
+            details = f'User reactivated: {name} ({role})'
+        else:
+            # Create new user
+            c.execute('INSERT INTO users (email, password, name, role, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)',
+                     (email, hash_password(password), name, role, datetime.now()))
+            action = 'USER_CREATE'
+            details = f'User created: {name} ({role})'
+        
         c.execute('INSERT INTO audit_log (user_email, action, product_sku, details, timestamp) VALUES (?, ?, ?, ?, ?)',
-                 (st.session_state.user_email, 'USER_CREATE', email, f'User created: {name} ({role})', datetime.now()))
+                 (st.session_state.user_email, action, email, details, datetime.now()))
         conn.commit()
         conn.close()
-        return True, "✅ User created successfully!"
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False, "❌ User already exists!"
+        return True, "✅ User created/reactivated successfully!"
     except Exception as e:
         conn.close()
         return False, f"❌ Error: {str(e)}"
 
-def delete_user(user_id, user_email):
+def permanently_delete_user(user_id, user_email):
+    """Permanently delete user (hard delete)"""
+    conn = sqlite3.connect('northern_harvest.db')
+    c = conn.cursor()
+    try:
+        c.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        c.execute('INSERT INTO audit_log (user_email, action, product_sku, details, timestamp) VALUES (?, ?, ?, ?, ?)',
+                 (st.session_state.user_email, 'USER_HARD_DELETE', user_email, 'User permanently deleted', datetime.now()))
+        conn.commit()
+        conn.close()
+        return True, "✅ User permanently deleted!"
+    except:
+        conn.close()
+        return False, "❌ Error deleting user"
+
+def soft_delete_user(user_id, user_email):
+    """Soft delete user (set is_active = 0)"""
     conn = sqlite3.connect('northern_harvest.db')
     c = conn.cursor()
     try:
         c.execute('UPDATE users SET is_active = 0 WHERE id = ?', (user_id,))
         c.execute('INSERT INTO audit_log (user_email, action, product_sku, details, timestamp) VALUES (?, ?, ?, ?, ?)',
-                 (st.session_state.user_email, 'USER_DELETE', user_email, 'User deleted', datetime.now()))
+                 (st.session_state.user_email, 'USER_DEACTIVATE', user_email, 'User deactivated', datetime.now()))
         conn.commit()
         conn.close()
-        return True, "✅ User deleted!"
+        return True, "✅ User deactivated!"
     except:
         conn.close()
-        return False, "❌ Error deleting user"
+        return False, "❌ Error deactivating user"
 
 def get_settings():
     conn = sqlite3.connect('northern_harvest.db')
@@ -816,17 +845,37 @@ else:
             with tab1:
                 users_df = get_all_users()
                 if len(users_df) > 0:
-                    st.dataframe(users_df, use_container_width=True, hide_index=True)
+                    # Show only active users
+                    active_users_df = users_df[users_df['is_active'] == 1]
+                    st.markdown("**Active Users:**")
+                    st.dataframe(active_users_df[['id', 'email', 'name', 'role', 'created_at']], use_container_width=True, hide_index=True)
+                    
+                    # Show inactive users separately
+                    inactive_users_df = users_df[users_df['is_active'] == 0]
+                    if len(inactive_users_df) > 0:
+                        st.markdown("---")
+                        st.markdown("**Inactive Users (Deleted):**")
+                        st.dataframe(inactive_users_df[['id', 'email', 'name', 'role', 'created_at']], use_container_width=True, hide_index=True)
                     
                     st.markdown("---")
-                    col1, col2 = st.columns(2)
+                    st.markdown(f"<div class='section-title'>🔧 Actions</div>", unsafe_allow_html=True)
+                    
+                    col1, col2, col3 = st.columns(3)
                     with col1:
-                        delete_user_id = st.selectbox("Select User to Delete", users_df['id'].tolist(), format_func=lambda x: users_df[users_df['id']==x]['email'].values[0])
+                        action_type = st.selectbox("Action", ["Deactivate (Soft Delete)", "Permanently Delete"])
                     
                     with col2:
-                        if st.button("🗑️ Delete User", use_container_width=True):
-                            user_email = users_df[users_df['id']==delete_user_id]['email'].values[0]
-                            success, msg = delete_user(delete_user_id, user_email)
+                        action_user_id = st.selectbox("Select User", users_df['id'].tolist(), format_func=lambda x: users_df[users_df['id']==x]['email'].values[0])
+                    
+                    with col3:
+                        if st.button("Execute", use_container_width=True):
+                            user_email = users_df[users_df['id']==action_user_id]['email'].values[0]
+                            
+                            if action_type == "Deactivate (Soft Delete)":
+                                success, msg = soft_delete_user(action_user_id, user_email)
+                            else:
+                                success, msg = permanently_delete_user(action_user_id, user_email)
+                            
                             if success:
                                 st.success(msg)
                                 st.rerun()
@@ -836,7 +885,9 @@ else:
                     st.info("No users found!")
             
             with tab2:
-                st.markdown("**Create New User**")
+                st.markdown("**Create New User or Reactivate Deleted User**")
+                st.info("💡 Tip: If user was deleted, use same email and new password to reactivate!")
+                
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -847,7 +898,7 @@ else:
                     new_role = st.selectbox("Role", ["user", "admin"])
                     new_password = st.text_input("Password", type="password")
                 
-                if st.button("➕ Create User", use_container_width=True):
+                if st.button("➕ Create/Reactivate User", use_container_width=True):
                     if new_email and new_name and new_password:
                         success, msg = add_user(new_email, new_password, new_name, new_role)
                         if success:
