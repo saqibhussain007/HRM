@@ -494,12 +494,12 @@ if not st.session_state.authenticated:
             else:
                 st.error("❌ Invalid credentials!")
         
-        st.markdown("---")
-        st.markdown("""
-        **Demo Accounts:**
-        - **Admin:** saqibhussain505@gmail.com / @Hussain007
-        - **User:** achill0076@gmail.com / password123
-        """)
+        # st.markdown("---")
+        # st.markdown("""
+        # **Demo Accounts:**
+        # - **Admin:** saqibhussain505@gmail.com / @Hussain007
+        # - **User:** achill0076@gmail.com / password123
+        # """)
 else:
     # Sidebar
     with st.sidebar:
