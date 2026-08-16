@@ -169,6 +169,15 @@ st.markdown(f"""
         border-radius: 4px;
         margin: 10px 0;
     }}
+    
+    .comp-card {{
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        text-align: center;
+        margin: 10px 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -193,6 +202,10 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS audit_log
                  (id INTEGER PRIMARY KEY, user_email TEXT, action TEXT, product_sku TEXT, details TEXT, timestamp TIMESTAMP)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS monthly_business
+                 (id INTEGER PRIMARY KEY, month TEXT UNIQUE, sales REAL, product_cost REAL, business_expenses REAL,
+                  employee_pct REAL, owner_pct REAL, reinvestment_pct REAL, created_at TIMESTAMP, updated_at TIMESTAMP)''')
     
     conn.commit()
     conn.close()
@@ -220,7 +233,8 @@ def set_default_settings():
     conn = sqlite3.connect('northern_harvest.db')
     c = conn.cursor()
     settings = [('target_margin', '30'), ('gateway_fee', '2.5'), ('platform_fee', '1.5'), 
-                ('delivery_cost', '250'), ('return_rate', '5'), ('rto_rate', '3')]
+                ('delivery_cost', '250'), ('return_rate', '5'), ('rto_rate', '3'),
+                ('employee_pct', '8'), ('owner_pct', '12'), ('reinvestment_pct', '6')]
     for key, value in settings:
         try:
             c.execute('INSERT INTO settings (setting_key, setting_value, created_at, updated_at) VALUES (?, ?, ?, ?)',
@@ -250,18 +264,15 @@ def add_user(email, password, name, role):
     conn = sqlite3.connect('northern_harvest.db')
     c = conn.cursor()
     try:
-        # Check if user exists (inactive)
         c.execute('SELECT id FROM users WHERE email = ?', (email,))
         existing = c.fetchone()
         
         if existing:
-            # Reactivate and update password
             c.execute('UPDATE users SET password = ?, name = ?, role = ?, is_active = 1, created_at = ? WHERE email = ?',
                      (hash_password(password), name, role, datetime.now(), email))
             action = 'USER_REACTIVATE'
             details = f'User reactivated: {name} ({role})'
         else:
-            # Create new user
             c.execute('INSERT INTO users (email, password, name, role, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)',
                      (email, hash_password(password), name, role, datetime.now()))
             action = 'USER_CREATE'
@@ -322,6 +333,47 @@ def update_settings(settings_dict):
                  (str(value), datetime.now(), key))
     conn.commit()
     conn.close()
+
+# Business & Compensation Functions
+def calculate_compensation(sales, product_cost, business_expenses, employee_pct, owner_pct, reinvestment_pct):
+    """Calculate monthly compensation"""
+    actual_profit = sales - product_cost - business_expenses
+    
+    employee_comp = sales * (employee_pct / 100)
+    owner_comp = sales * (owner_pct / 100)
+    reinvestment = sales * (reinvestment_pct / 100)
+    final_profit = actual_profit - employee_comp - owner_comp - reinvestment
+    
+    return {
+        'actual_profit': actual_profit,
+        'employee_comp': employee_comp,
+        'owner_comp': owner_comp,
+        'reinvestment': reinvestment,
+        'final_profit': final_profit
+    }
+
+def save_monthly_business(month, sales, product_cost, business_expenses, employee_pct, owner_pct, reinvestment_pct):
+    """Save monthly business record"""
+    conn = sqlite3.connect('northern_harvest.db')
+    c = conn.cursor()
+    try:
+        c.execute('''INSERT OR REPLACE INTO monthly_business 
+                     (month, sales, product_cost, business_expenses, employee_pct, owner_pct, reinvestment_pct, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                 (month, sales, product_cost, business_expenses, employee_pct, owner_pct, reinvestment_pct, datetime.now(), datetime.now()))
+        conn.commit()
+        conn.close()
+        return True, "✅ Monthly record saved!"
+    except Exception as e:
+        conn.close()
+        return False, f"❌ Error: {str(e)}"
+
+def get_all_monthly_records():
+    """Get all monthly business records"""
+    conn = sqlite3.connect('northern_harvest.db')
+    df = pd.read_sql_query('SELECT * FROM monthly_business ORDER BY month DESC', conn)
+    conn.close()
+    return df
 
 def calculate_pricing(data):
     purchase = float(data.get('purchase_cost', 0))
@@ -494,12 +546,6 @@ if not st.session_state.authenticated:
             else:
                 st.error("❌ Invalid credentials!")
         
-        # st.markdown("---")
-        # st.markdown("""
-        # **Demo Accounts:**
-        # - **Admin:** saqibhussain505@gmail.com / @Hussain007
-        # - **User:** achill0076@gmail.com / password123
-        # """)
 else:
     # Sidebar
     with st.sidebar:
@@ -516,7 +562,8 @@ else:
         nav = st.radio("📍 Navigation", [
             "🏠 Home", 
             "🧮 Calculator", 
-            "📊 Product Master", 
+            "📊 Product Master",
+            "💼 Business & Compensation",
             "⚙️ Settings",
             "👥 User Management",
             "📋 Audit Log"
@@ -802,6 +849,124 @@ else:
                         else:
                             st.error(msg)
     
+    # Business & Compensation
+    elif nav == "💼 Business & Compensation":
+        st.markdown(f"<div class='section-title'>💼 Monthly Business & Compensation</div>", unsafe_allow_html=True)
+        
+        if st.session_state.user_role != 'admin':
+            st.error("❌ Only administrators can manage business records!")
+        else:
+            tab1, tab2 = st.tabs(["📝 Add/Update Month", "📊 View Records"])
+            
+            with tab1:
+                st.markdown("**Enter Monthly Business Data**")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    month_year = st.text_input("Month & Year (e.g., January 2024)", "January 2024")
+                    sales = st.number_input("💰 Total Sales", min_value=0.0, value=20000.0)
+                    product_cost = st.number_input("📦 Product Cost", min_value=0.0, value=12000.0)
+                
+                with col2:
+                    business_expenses = st.number_input("🏢 Business Expenses", min_value=0.0, value=3000.0)
+                    st.markdown("---")
+                    st.markdown("**Compensation %** (Recommended: Employee 8%, Owner 12%, Reinvestment 6%)")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    employee_pct = st.number_input("👨‍💼 Employee %", min_value=0.0, value=8.0)
+                with col2:
+                    owner_pct = st.number_input("👑 Owner %", min_value=0.0, value=12.0)
+                with col3:
+                    reinvestment_pct = st.number_input("🔄 Reinvestment %", min_value=0.0, value=6.0)
+                
+                st.markdown("---")
+                
+                # Calculate
+                comp = calculate_compensation(sales, product_cost, business_expenses, employee_pct, owner_pct, reinvestment_pct)
+                
+                st.markdown(f"<div class='section-title'>📊 Calculation Results</div>", unsafe_allow_html=True)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"""
+                        <div class="comp-card">
+                            <div class="price-label">Actual Profit</div>
+                            <div class="price-value">₨ {comp['actual_profit']:,.0f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                        <div class="comp-card" style="background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border: 2px solid #4caf50;">
+                            <div class="price-label">✅ Final Profit</div>
+                            <div class="price-value">₨ {comp['final_profit']:,.0f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"""
+                        <div class="comp-card">
+                            <div class="price-label">👨‍💼 Employee Comp</div>
+                            <div class="price-value">₨ {comp['employee_comp']:,.0f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                        <div class="comp-card">
+                            <div class="price-label">👑 Owner Comp</div>
+                            <div class="price-value">₨ {comp['owner_comp']:,.0f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    st.markdown(f"""
+                        <div class="comp-card">
+                            <div class="price-label">🔄 Reinvestment</div>
+                            <div class="price-value">₨ {comp['reinvestment']:,.0f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                if st.button("💾 Save Monthly Record", use_container_width=True):
+                    success, msg = save_monthly_business(month_year, sales, product_cost, business_expenses, 
+                                                        employee_pct, owner_pct, reinvestment_pct)
+                    if success:
+                        st.success(msg)
+                        st.balloons()
+                    else:
+                        st.error(msg)
+            
+            with tab2:
+                st.markdown("**Monthly Records History**")
+                records_df = get_all_monthly_records()
+                
+                if len(records_df) == 0:
+                    st.info("📭 No records found. Create your first record in 'Add/Update Month' tab!")
+                else:
+                    # Prepare display dataframe
+                    display_records = []
+                    for _, row in records_df.iterrows():
+                        comp = calculate_compensation(row['sales'], row['product_cost'], row['business_expenses'],
+                                                     row['employee_pct'], row['owner_pct'], row['reinvestment_pct'])
+                        display_records.append({
+                            'Month': row['month'],
+                            'Sales': f"₨ {row['sales']:,.0f}",
+                            'Product Cost': f"₨ {row['product_cost']:,.0f}",
+                            'Expenses': f"₨ {row['business_expenses']:,.0f}",
+                            'Actual Profit': f"₨ {comp['actual_profit']:,.0f}",
+                            'Employee': f"₨ {comp['employee_comp']:,.0f}",
+                            'Owner': f"₨ {comp['owner_comp']:,.0f}",
+                            'Reinvestment': f"₨ {comp['reinvestment']:,.0f}",
+                            'Final Profit': f"₨ {comp['final_profit']:,.0f}"
+                        })
+                    
+                    display_df = pd.DataFrame(display_records)
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
     # Settings
     elif nav == "⚙️ Settings":
         st.markdown(f"<div class='section-title'>⚙️ Settings</div>", unsafe_allow_html=True)
@@ -811,27 +976,51 @@ else:
         else:
             settings = get_settings()
             
-            col1, col2 = st.columns(2)
-            with col1:
-                target_margin = st.number_input("Default Target Margin %", value=float(settings.get('target_margin', 30)), min_value=0.0)
-                gateway_fee = st.number_input("Default Gateway Fee %", value=float(settings.get('gateway_fee', 2.5)), min_value=0.0)
-                platform_fee = st.number_input("Default Platform Fee %", value=float(settings.get('platform_fee', 1.5)), min_value=0.0)
+            tab1, tab2 = st.tabs(["📊 Product Settings", "💼 Compensation Settings"])
             
-            with col2:
-                delivery_cost = st.number_input("Default Delivery Cost", value=float(settings.get('delivery_cost', 250)), min_value=0.0)
-                return_rate = st.number_input("Default Return Rate %", value=float(settings.get('return_rate', 5)), min_value=0.0)
-                rto_rate = st.number_input("Default RTO Rate %", value=float(settings.get('rto_rate', 3)), min_value=0.0)
+            with tab1:
+                col1, col2 = st.columns(2)
+                with col1:
+                    target_margin = st.number_input("Default Target Margin %", value=float(settings.get('target_margin', 30)), min_value=0.0)
+                    gateway_fee = st.number_input("Default Gateway Fee %", value=float(settings.get('gateway_fee', 2.5)), min_value=0.0)
+                    platform_fee = st.number_input("Default Platform Fee %", value=float(settings.get('platform_fee', 1.5)), min_value=0.0)
+                
+                with col2:
+                    delivery_cost = st.number_input("Default Delivery Cost", value=float(settings.get('delivery_cost', 250)), min_value=0.0)
+                    return_rate = st.number_input("Default Return Rate %", value=float(settings.get('return_rate', 5)), min_value=0.0)
+                    rto_rate = st.number_input("Default RTO Rate %", value=float(settings.get('rto_rate', 3)), min_value=0.0)
+                
+                if st.button("💾 Save Product Settings", use_container_width=True):
+                    update_settings({
+                        'target_margin': target_margin,
+                        'gateway_fee': gateway_fee,
+                        'platform_fee': platform_fee,
+                        'delivery_cost': delivery_cost,
+                        'return_rate': return_rate,
+                        'rto_rate': rto_rate
+                    })
+                    st.success("✅ Settings updated!")
             
-            if st.button("💾 Save Settings", use_container_width=True):
-                update_settings({
-                    'target_margin': target_margin,
-                    'gateway_fee': gateway_fee,
-                    'platform_fee': platform_fee,
-                    'delivery_cost': delivery_cost,
-                    'return_rate': return_rate,
-                    'rto_rate': rto_rate
-                })
-                st.success("✅ Settings updated!")
+            with tab2:
+                st.info("💡 Set default compensation percentages")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    employee_pct = st.number_input("Employee Compensation %", value=float(settings.get('employee_pct', 8)), min_value=0.0)
+                
+                with col2:
+                    owner_pct = st.number_input("Owner Compensation %", value=float(settings.get('owner_pct', 12)), min_value=0.0)
+                
+                with col3:
+                    reinvestment_pct = st.number_input("Reinvestment %", value=float(settings.get('reinvestment_pct', 6)), min_value=0.0)
+                
+                if st.button("💾 Save Compensation Settings", use_container_width=True):
+                    update_settings({
+                        'employee_pct': employee_pct,
+                        'owner_pct': owner_pct,
+                        'reinvestment_pct': reinvestment_pct
+                    })
+                    st.success("✅ Settings updated!")
     
     # User Management
     elif nav == "👥 User Management":
@@ -845,12 +1034,10 @@ else:
             with tab1:
                 users_df = get_all_users()
                 if len(users_df) > 0:
-                    # Show only active users
                     active_users_df = users_df[users_df['is_active'] == 1]
                     st.markdown("**Active Users:**")
                     st.dataframe(active_users_df[['id', 'email', 'name', 'role', 'created_at']], use_container_width=True, hide_index=True)
                     
-                    # Show inactive users separately
                     inactive_users_df = users_df[users_df['is_active'] == 0]
                     if len(inactive_users_df) > 0:
                         st.markdown("---")
